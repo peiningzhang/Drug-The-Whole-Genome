@@ -34,6 +34,23 @@ each line in result file look like this:
 smiles,score
 ```
 
+### For data won't fit in mem
+
+To perform screening on chucked mol embedding files, run:
+
+```shell
+python utils/screening_chucks.py --gpu_num 8 --mol_embs <path_to_multiple_chucks> --zscore_embs <uniform_small_set_for_approx_zscore> --pocket_reps <path_to_pocket_reps_pkl> --batch_size <batch_size> --output_dir <path_to_output_dir> --rm_intermediate
+```
+
+The `--mol_embs` argument allows multiple args. Each arg should be a path to a chunk of molecule embeddings. The `--zscore_embs` argument should be a path to a small set of molecule embeddings for approximating the zscore; if not specified, the first `mol_embs` file is used. The resulting files will be saved as `merge{mol_embs_file_id}_{gpu_id}.pkl` in `output_dir` . The `--rm_intermediate` flag will remove the intermediate files after the next chunk for saving disk space.
+
+To retrieve SMILES strings and original ids for the output files, run:
+
+```shell
+python utils/retrieve_chunk.py --input_files output/merge*.pkl --mol_lmdb <path_to_mol_lmdb> --output_dir retrieval_results --num_threads <num_threads>
+```
+
+The `--mol_lmdb` should be extractly the same order as the `--mol_embs` argument in the last step. The resulting files will be saved as `retrieval_results/{pocket_name}.csv`.
 
 ## Benchmarking
 
