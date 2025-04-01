@@ -15,6 +15,7 @@ CUDA_VISIBLE_DEVICES="1" python ./unimol/retrieval.py --user-dir ./unimol $data_
        --num-workers 8 --ddp-backend=c10d --batch-size 4 \
        --task drugclip --loss in_batch_softmax --arch drugclip  \
        --max-pocket-atoms 511 \
+       --cpu \
        --fp16 --fp16-init-scale 4 --fp16-scale-window 256  --seed 1 \
        --log-interval 100 --log-format simple \
        --mol-path $MOL_PATH \

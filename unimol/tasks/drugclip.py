@@ -1630,7 +1630,7 @@ class DrugCLIP(UnicoreTask):
 
 
 
-    def retrieval_multi_folds(self, model, pocket_path, save_path, n_folds=6, use_cache=True, **kwargs):
+    def retrieval_multi_folds(self, model, pocket_path, save_path, n_folds=6, use_cuda=True, use_cache=True, **kwargs):
         
 
         if n_folds==6:
@@ -1680,7 +1680,8 @@ class DrugCLIP(UnicoreTask):
                 mol_ids_subsets = []
                 mol_data = torch.utils.data.DataLoader(mol_dataset, batch_size=bsz, collate_fn=mol_dataset.collater)
                 for _, sample in enumerate(tqdm(mol_data)):
-                    sample = unicore.utils.move_to_cuda(sample)
+                    if use_cuda:
+                        sample = unicore.utils.move_to_cuda(sample)
                     dist = sample["net_input"]["mol_src_distance"]
                     et = sample["net_input"]["mol_src_edge_type"]
                     st = sample["net_input"]["mol_src_tokens"]
@@ -1713,7 +1714,9 @@ class DrugCLIP(UnicoreTask):
             pocket_reps = []
 
             for _, sample in enumerate(tqdm(pocket_data)):
-                sample = unicore.utils.move_to_cuda(sample)
+                if use_cuda:
+                    sample = unicore.utils.move_to_cuda(sample)
+                #sample = unicore.utils.move_to_cuda(sample)
                 dist = sample["net_input"]["pocket_src_distance"]
                 et = sample["net_input"]["pocket_src_edge_type"]
                 st = sample["net_input"]["pocket_src_tokens"]

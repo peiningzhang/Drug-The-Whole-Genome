@@ -48,10 +48,11 @@ def main(args):
     #model.load_state_dict(state["model"], strict=False)
 
     # Move models to GPU
-    if use_fp16:
-        model.half()
     if use_cuda:
-        model.cuda()
+        if use_fp16:
+            model.half()
+        if use_cuda:
+            model.cuda()
 
     # Print args
     logger.info(args)
@@ -61,7 +62,7 @@ def main(args):
     
     #names, scores = task.retrieve_mols(model, args.mol_path, args.pocket_path, args.emb_dir, 10000)
 
-    task.retrieval_multi_folds(model, args.pocket_path, args.save_path, n_folds=args.num_folds)
+    task.retrieval_multi_folds(model, args.pocket_path, args.save_path, n_folds=args.num_folds, use_cuda=use_cuda)
 
 
 def cli_main():
