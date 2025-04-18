@@ -21,4 +21,5 @@ CUDA_VISIBLE_DEVICES=$device python ./unimol/encode_mols.py --user-dir ./unimol 
        --seed 1 \
        --log-interval 100 --log-format simple \
        --mol-path $mol_path \
-       --save-dir $save_path 
+       --save-dir $save_path \
+       --start 0 --end 30 

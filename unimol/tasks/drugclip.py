@@ -23,11 +23,12 @@ from unimol.data import (AffinityDataset, CroppingPocketDataset,
                          EdgeTypeDataset, KeyDataset, LengthDataset,
                          NormalizeDataset, NormalizeDockingPoseDataset,
                          PrependAndAppend2DDataset, RemoveHydrogenDataset,
-                         RemoveHydrogenPocketDataset, RightPadDatasetCoord,
+                         RemoveHydrogenPocketDataset, RightPadDatasetCoord, LMDBDatasetV2, LMDBKeyDataset,
                          RightPadDatasetCross2D, TTADockingPoseDataset, AffinityTestDataset, AffinityValidDataset, AffinityMolDataset, AffinityPocketDataset, ResamplingDataset)
 #from skchem.metrics import bedroc_score
 from rdkit.ML.Scoring.Scoring import CalcBEDROC, CalcAUC, CalcEnrichment
 from sklearn.metrics import roc_curve
+import h5py
 
 
 logger = logging.getLogger(__name__)
@@ -492,8 +493,22 @@ class DrugCLIP(UnicoreTask):
             split (str): name of the data scoure (e.g., bppp)
         """
 
- 
-        dataset = LMDBDataset(data_path)
+        if os.path.isdir(data_path):
+            dataset = LMDBDatasetV2(data_path)
+            keys = dataset.get_split("success")
+            keys = list(sorted(list(set(keys))))
+            start = kwargs.get("start", 0)
+            end = kwargs.get("end", len(keys))
+            if start >= len(keys):
+                raise ValueError("start should be less than len(keys) = {}".format(len(keys)))
+            dataset.set_split("chunk", keys[start:end], deduplicate=False, temporary=True)
+            dataset.set_default_split("chunk")
+            keydataset = LMDBKeyDataset(data_path)
+            keydataset.set_split("chunk", keys[start:end], deduplicate=False, temporary=True)
+            keydataset.set_default_split("chunk")
+        else:
+            dataset = LMDBDataset(data_path)
+            keydataset = None
         
         dataset = AffinityMolDataset(
             dataset,
@@ -503,7 +518,7 @@ class DrugCLIP(UnicoreTask):
             False,
         )
 
-        smi_dataset = KeyDataset(dataset, "smi")
+        # smi_dataset = KeyDataset(dataset, "smi")
         
         
 
@@ -534,28 +549,28 @@ class DrugCLIP(UnicoreTask):
         distance_dataset = PrependAndAppend2DDataset(distance_dataset, 0.0)
 
 
-        nest_dataset = NestedDictionaryDataset(
-            {
-                "net_input": {
-                    "mol_src_tokens": RightPadDataset(
-                        src_dataset,
-                        pad_idx=self.dictionary.pad(),
-                    ),
-                    "mol_src_distance": RightPadDataset2D(
-                        distance_dataset,
-                        pad_idx=0,
-                    ),
-                    "mol_src_edge_type": RightPadDataset2D(
-                        edge_type,
-                        pad_idx=0,
-                    ),
-                },
-                "smi_name": RawArrayDataset(smi_dataset),
-                #"target":  RawArrayDataset(label_dataset),
-                "mol_len": RawArrayDataset(len_dataset),
+        nest_dataset = {
+            "net_input": {
+                "mol_src_tokens": RightPadDataset(
+                    src_dataset,
+                    pad_idx=self.dictionary.pad(),
+                ),
+                "mol_src_distance": RightPadDataset2D(
+                    distance_dataset,
+                    pad_idx=0,
+                ),
+                "mol_src_edge_type": RightPadDataset2D(
+                    edge_type,
+                    pad_idx=0,
+                ),
             },
-        )
-        return nest_dataset
+            # "smi_name": RawArrayDataset(smi_dataset),
+            #"target":  RawArrayDataset(label_dataset),
+            "mol_len": RawArrayDataset(len_dataset),
+        }
+        if keydataset is not None:
+            nest_dataset["key"] = RawArrayDataset(keydataset)
+        return NestedDictionaryDataset(nest_dataset)
 
 
     def load_retrieval_mols_dataset(self, data_path,atoms,coords, **kwargs):
@@ -1462,8 +1477,8 @@ class DrugCLIP(UnicoreTask):
 
             
 
-            state = checkpoint_utils.load_checkpoint_to_cpu(ckpt)
-            model.load_state_dict(state["model"], strict=False)
+            # state = checkpoint_utils.load_checkpoint_to_cpu(ckpt)
+            # model.load_state_dict(state["model"], strict=False)
 
             
             #mol_data_path = "/drug/DrugCLIP_chemdata_v2024/DrugCLIP_mols_v2024.lmdb"
@@ -1471,18 +1486,35 @@ class DrugCLIP(UnicoreTask):
             mol_data_path = mol_path
 
             
-            mol_dataset = self.load_mols_dataset_dtwg(mol_data_path, "atoms", "coordinates")
+            mol_dataset = self.load_mols_dataset_dtwg(mol_data_path, "atoms", "coordinates", **kwargs)
             bsz=batch_size
             mol_reps = []
             mol_names = []
             mol_ids_subsets = []
             
             # generate mol data
-
-            
+            skip_batch = 0
+            if os.path.isdir(mol_data_path):
+                hdf5 = h5py.File(os.path.join(save_dir,f"mol_reps{kwargs.get('start', '')}{kwargs.get('end', '')}.h5"), "a")
+                dset = hdf5.require_dataset("mol_reps", shape=(len(mol_dataset), 768), dtype=np.float16, chunks=True, compression="gzip")
+                kset = hdf5.require_dataset("fold{}".format(fold), shape=(len(mol_dataset),), dtype=h5py.string_dtype(encoding='utf-8'), chunks=True, compression="gzip")
+                written_mask = np.array([s != b'' for s in kset[:]])  # 注意是 byte string
+                num_written = np.sum(written_mask)
+                if num_written == len(mol_dataset):
+                    mol_reps = dset[:, fold*128:(fold+1)*128]
+                    mol_reps = np.expand_dims(mol_reps, axis=1)
+                    mol_reps_all.append(mol_reps)
+                    print("Already written fold {} mols".format(fold))
+                    continue
+                elif num_written > 0:
+                    skip_batch = num_written // bsz
+                    mol_reps.append(dset[:num_written, fold*128:(fold+1)*128])
+                    print("Already written {} mols in fold {}, will skip {} batches".format(num_written, fold, skip_batch))
             
             mol_data = torch.utils.data.DataLoader(mol_dataset, batch_size=bsz, collate_fn=mol_dataset.collater)
-            for _, sample in enumerate(tqdm(mol_data)):
+            for batch, sample in enumerate(tqdm(mol_data)):
+                if batch < skip_batch:
+                    continue
                 if use_cuda:
                     sample = unicore.utils.move_to_cuda(sample)
                 
@@ -1504,13 +1536,18 @@ class DrugCLIP(UnicoreTask):
                 mol_emb = model.mol_project(mol_encoder_rep)
                 mol_emb = mol_emb / mol_emb.norm(dim=-1, keepdim=True)
                 mol_emb = mol_emb.detach().cpu().numpy()
+                if "key" in sample:
+                    assert len(sample["key"]) == len(mol_emb)
+                    dset[batch*bsz:batch*bsz+len(mol_emb), fold*128:(fold+1)*128] = mol_emb
+                    kset[batch*bsz:batch*bsz+len(sample["key"])] = sample["key"]
+                    hdf5.flush()
                 #mol_reps.append(mol_emb)
                 #index = st.squeeze(0) > 3
                 #cur_mol_reps = mol_outputs[0]
                 #cur_mol_reps = cur_mol_reps[:, index, :]
                 mol_reps.append(mol_emb)
                 #print(mol_emb.detach().cpu().numpy().shape)
-                mol_names.extend(sample["smi_name"])
+                # mol_names.extend(sample["smi_name"])
 
                 #ids = sample["id"]
                 #subsets = sample["subset"]
@@ -1520,12 +1557,14 @@ class DrugCLIP(UnicoreTask):
             # add a dimension to mol_reps
             mol_reps = np.expand_dims(mol_reps, axis=1)
             mol_reps_all.append(mol_reps)
+            if "key" in sample:
+                hdf5.close()
         
         # concate
 
         mol_reps_all = np.concatenate(mol_reps_all, axis=1)
 
-        mol_names = np.array(mol_names)
+        # mol_names = np.array(mol_names)
 
         
 
@@ -1534,7 +1573,7 @@ class DrugCLIP(UnicoreTask):
 
         # save the reps to npy file
         print(mol_reps_all.shape)
-        np.save(os.path.join(save_dir,"mol_reps.npy"), mol_reps_all)
+        np.save(os.path.join(save_dir,f"mol_reps{kwargs.get('start', '')}{kwargs.get('end', '')}.npy"), mol_reps_all)
 
     
     def encode_pockets_multi_folds(self, model, pocket_dir, pocket_path, **kwargs):
