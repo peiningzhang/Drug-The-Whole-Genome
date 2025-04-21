@@ -483,7 +483,7 @@ class DrugCLIP(UnicoreTask):
         )
         return nest_dataset
 
-    def load_mols_dataset_dtwg(self, data_path,atoms,coords, **kwargs):
+    def load_mols_dataset_dtwg(self, data_path,atoms,coords,dataset_type=1, **kwargs):
         #atom_key = 'atoms'
         #atom_key = 'atom_types'
 
@@ -493,12 +493,14 @@ class DrugCLIP(UnicoreTask):
             split (str): name of the data scoure (e.g., bppp)
         """
 
-        if os.path.isdir(data_path):
+        if dataset_type == 2:
             dataset = LMDBDatasetV2(data_path)
             keys = dataset.get_split("success")
             keys = list(sorted(list(set(keys))))
             start = kwargs.get("start", 0)
-            end = kwargs.get("end", len(keys))
+            end = kwargs.get("end")
+            if end is None:
+                end = len(keys)
             if start >= len(keys):
                 raise ValueError("start should be less than len(keys) = {}".format(len(keys)))
             dataset.set_split("chunk", keys[start:end], deduplicate=False, temporary=True)
@@ -507,8 +509,10 @@ class DrugCLIP(UnicoreTask):
             keydataset.set_split("chunk", keys[start:end], deduplicate=False, temporary=True)
             keydataset.set_default_split("chunk")
         else:
+            if kwargs.get("start", 0) != 0 or kwargs.get("end", None) is not None:
+                logger.info("chuck is not supported when using default lmdb, ignore start and end")
             dataset = LMDBDataset(data_path)
-            keydataset = None
+            keydataset = KeyDataset(dataset, "smi")
         
         dataset = AffinityMolDataset(
             dataset,
@@ -1451,25 +1455,33 @@ class DrugCLIP(UnicoreTask):
 
     
 
-    def encode_mols_multi_folds(self, model, batch_size, mol_path, save_dir, use_cuda, **kwargs):
+    def encode_mols_multi_folds(self, model, batch_size, mol_path, save_dir, use_cuda, dataset_type=None, write_npy=True, write_h5=True, **kwargs):
 
         # 6 folds
         
         ckpts = [f"./data/model_weights/6_folds/fold_{i}.pt" for i in range(6)]
 
-        
-
+        if dataset_type is None:
+            dataset_type = 2 if os.path.isdir(mol_path) else 1
+        logger.info(f"dataset_type: {dataset_type}")
+        if write_h5:
+            h5_path = os.path.join(save_dir,f"mol_reps{kwargs.get('start', '')}{kwargs.get('end', '')}.h5")
+            logger.info(f"encoding write to {h5_path}, resume is supported")
+        if write_npy:
+            npy_path = os.path.join(save_dir,f"mol_reps{kwargs.get('start', '')}{kwargs.get('end', '')}.npy")
+            logger.info(f"encoding write to {npy_path} in one shot, embeddings will accumulate in the memory")
+            if not write_h5: logger.info("resume is not supported for npy")
 
         #ckpts = ckpts[:1]
 
-        prefix = "/drug/DrugCLIP_chemdata_v2024/embs/"
+        # prefix = "/drug/DrugCLIP_chemdata_v2024/embs/"
 
-        prefix = save_dir
+        # prefix = save_dir
 
         #os.makedirs(prefix, exist_ok=True)
 
-        caches = ["fold0.pkl", "fold1.pkl", "fold2.pkl", "fold3.pkl", "fold4.pkl", "fold5.pkl"]
-        caches = [prefix + cache for cache in caches]
+        # caches = ["fold0.pkl", "fold1.pkl", "fold2.pkl", "fold3.pkl", "fold4.pkl", "fold5.pkl"]
+        # caches = [prefix + cache for cache in caches]
 
         mol_reps_all = []
 
@@ -1477,8 +1489,8 @@ class DrugCLIP(UnicoreTask):
 
             
 
-            # state = checkpoint_utils.load_checkpoint_to_cpu(ckpt)
-            # model.load_state_dict(state["model"], strict=False)
+            state = checkpoint_utils.load_checkpoint_to_cpu(ckpt)
+            model.load_state_dict(state["model"], strict=False)
 
             
             #mol_data_path = "/drug/DrugCLIP_chemdata_v2024/DrugCLIP_mols_v2024.lmdb"
@@ -1486,7 +1498,7 @@ class DrugCLIP(UnicoreTask):
             mol_data_path = mol_path
 
             
-            mol_dataset = self.load_mols_dataset_dtwg(mol_data_path, "atoms", "coordinates", **kwargs)
+            mol_dataset = self.load_mols_dataset_dtwg(mol_data_path, "atoms", "coordinates", dataset_type=dataset_type, **kwargs)
             bsz=batch_size
             mol_reps = []
             mol_names = []
@@ -1494,24 +1506,26 @@ class DrugCLIP(UnicoreTask):
             
             # generate mol data
             skip_batch = 0
-            if os.path.isdir(mol_data_path):
+            if write_h5:
                 hdf5 = h5py.File(os.path.join(save_dir,f"mol_reps{kwargs.get('start', '')}{kwargs.get('end', '')}.h5"), "a")
-                dset = hdf5.require_dataset("mol_reps", shape=(len(mol_dataset), 768), dtype=np.float16, chunks=True, compression="gzip")
+                dset = hdf5.require_dataset("mol_reps", shape=(len(mol_dataset), 768), dtype=np.float32, chunks=True, compression="gzip")
                 kset = hdf5.require_dataset("fold{}".format(fold), shape=(len(mol_dataset),), dtype=h5py.string_dtype(encoding='utf-8'), chunks=True, compression="gzip")
                 written_mask = np.array([s != b'' for s in kset[:]])  # 注意是 byte string
                 num_written = np.sum(written_mask)
                 if num_written == len(mol_dataset):
-                    mol_reps = dset[:, fold*128:(fold+1)*128]
-                    mol_reps = np.expand_dims(mol_reps, axis=1)
-                    mol_reps_all.append(mol_reps)
+                    if write_npy:
+                        mol_reps = dset[:, fold*128:(fold+1)*128]
+                        mol_reps = np.expand_dims(mol_reps, axis=1)
+                        mol_reps_all.append(mol_reps)
                     print("Already written fold {} mols".format(fold))
                     continue
                 elif num_written > 0:
                     skip_batch = num_written // bsz
-                    mol_reps.append(dset[:num_written, fold*128:(fold+1)*128])
+                    if skip_batch > 0 and write_npy:
+                        mol_reps.append(dset[:num_written, fold*128:(fold+1)*128])
                     print("Already written {} mols in fold {}, will skip {} batches".format(num_written, fold, skip_batch))
             
-            mol_data = torch.utils.data.DataLoader(mol_dataset, batch_size=bsz, collate_fn=mol_dataset.collater)
+            mol_data = torch.utils.data.DataLoader(mol_dataset, batch_size=bsz, collate_fn=mol_dataset.collater, num_workers=4)
             for batch, sample in enumerate(tqdm(mol_data)):
                 if batch < skip_batch:
                     continue
@@ -1536,7 +1550,7 @@ class DrugCLIP(UnicoreTask):
                 mol_emb = model.mol_project(mol_encoder_rep)
                 mol_emb = mol_emb / mol_emb.norm(dim=-1, keepdim=True)
                 mol_emb = mol_emb.detach().cpu().numpy()
-                if "key" in sample:
+                if write_h5:
                     assert len(sample["key"]) == len(mol_emb)
                     dset[batch*bsz:batch*bsz+len(mol_emb), fold*128:(fold+1)*128] = mol_emb
                     kset[batch*bsz:batch*bsz+len(sample["key"])] = sample["key"]
@@ -1545,7 +1559,8 @@ class DrugCLIP(UnicoreTask):
                 #index = st.squeeze(0) > 3
                 #cur_mol_reps = mol_outputs[0]
                 #cur_mol_reps = cur_mol_reps[:, index, :]
-                mol_reps.append(mol_emb)
+                if write_npy:
+                    mol_reps.append(mol_emb)
                 #print(mol_emb.detach().cpu().numpy().shape)
                 # mol_names.extend(sample["smi_name"])
 
@@ -1553,27 +1568,28 @@ class DrugCLIP(UnicoreTask):
                 #subsets = sample["subset"]
                 #ids_subsets = [ids[i] + ";" + subsets[i] for i in range(len(ids))]
                 #mol_ids_subsets.extend(ids_subsets)
-            mol_reps = np.concatenate(mol_reps, axis=0)
-            # add a dimension to mol_reps
-            mol_reps = np.expand_dims(mol_reps, axis=1)
-            mol_reps_all.append(mol_reps)
-            if "key" in sample:
+            if write_npy:
+                mol_reps = np.concatenate(mol_reps, axis=0)
+                # add a dimension to mol_reps
+                mol_reps = np.expand_dims(mol_reps, axis=1)
+                mol_reps_all.append(mol_reps)
+            if write_h5:
                 hdf5.close()
         
         # concate
+        if write_npy:
+            mol_reps_all = np.concatenate(mol_reps_all, axis=1)
 
-        mol_reps_all = np.concatenate(mol_reps_all, axis=1)
+            # mol_names = np.array(mol_names)
 
-        # mol_names = np.array(mol_names)
+            
 
-        
+            # convert to float 32
+            mol_reps_all = mol_reps_all.astype(np.float32)
 
-        # convert to float 32
-        mol_reps_all = mol_reps_all.astype(np.float32)
-
-        # save the reps to npy file
-        print(mol_reps_all.shape)
-        np.save(os.path.join(save_dir,f"mol_reps{kwargs.get('start', '')}{kwargs.get('end', '')}.npy"), mol_reps_all)
+            # save the reps to npy file
+            print(mol_reps_all.shape)
+            np.save(os.path.join(save_dir,f"mol_reps{kwargs.get('start', '')}{kwargs.get('end', '')}.npy"), mol_reps_all)
 
     
     def encode_pockets_multi_folds(self, model, pocket_dir, pocket_path, **kwargs):
