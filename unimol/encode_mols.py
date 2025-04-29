@@ -62,7 +62,7 @@ def main(args):
     #names, scores = task.retrieve_mols(model, args.mol_path, args.pocket_path, args.emb_dir, 10000)
 
     #task.encode_mols_multi_folds(model, "/drug/DrugCLIP_chemdata_v2024/DrugCLIP_mols_v2024.lmdb", "/drug/tmp_save/")
-    task.encode_mols_multi_folds(model, args.batch_size, args.mol_path, args.save_dir, use_cuda)
+    task.encode_mols_multi_folds(model, args.batch_size, args.mol_path, args.save_dir, use_cuda, write_npy=args.write_npy, write_h5=args.write_h5, start=args.start, end=args.end)
 
 
 def cli_main():
@@ -72,6 +72,10 @@ def cli_main():
     parser = options.get_validation_parser()
     parser.add_argument("--mol-path", type=str, default="", help="path for mol data")
     parser.add_argument("--save-dir", type=str, default="", help="save dir")
+    parser.add_argument("--start", type=int, default=0, help="start index")
+    parser.add_argument("--end", type=int, default=None, help="batch size")
+    parser.add_argument("--write-npy", action="store_true", help="write npy")
+    parser.add_argument("--write-h5", action="store_true", help="write h5")
 
     options.add_model_args(parser)
     args = options.parse_args_and_arch(parser)
