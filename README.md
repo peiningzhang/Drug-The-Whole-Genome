@@ -4,8 +4,11 @@
 
 This project uses different licenses for different components:
 
-- **Source Code & Database**: Licensed under [CC BY 4.0](docs/LICENSE.md)
-  - The source code and Drug-The-Whole-Genome database are freely available for both academic and commercial use with attribution.
+- **Source Code**: Licensed under [Apache 2.0](LICENSE)
+  - The source code is freely available for both academic and commercial use.
+
+- **Database**: Licensed under [CC BY 4.0](docs/LICENSE.md)
+  - The Drug-The-Whole-Genome database is freely available for both academic and commercial use with attribution.
 
 - **Model Weights & Outputs**: Licensed under [CC BY-NC 4.0](docs/MODEL_WEIGHTS_LICENSE.md)
   - The DrugCLIP model weights and all results generated using the model are available for non-commercial use only.
