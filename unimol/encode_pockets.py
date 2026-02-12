@@ -130,15 +130,45 @@ def process_one_pdbdir(dirs,name='pocket'):
         if '.pdb' in d and '_clean' not in d:
             try:
                 p = PDBParser()
-                model = p.get_structure('0',os.path.join(dirs,d))[0]  
-                tmp_chain,liglist = extract_lig_recpt(model,re.search(r'_.*\.',d)[0][1:-1])
-                pocket = get_binding_pockets(tmp_chain,liglist)
-                pocket = [pocket2lmdb(n,p,d.split('.')[0]) for n,p in pocket]
-                all_pocket += pocket
-            except:
+                model = p.get_structure('0',os.path.join(dirs,d))[0]
+                # Try to extract ligand name from filename first
+                ligand_match = re.search(r'_.*\.',d)
+                if ligand_match:
+                    ligand_name = ligand_match[0][1:-1]
+                else:
+                    # If no match, try to extract from PDB file
+                    ligand_name = None
+                    with open(os.path.join(dirs,d), 'r') as f:
+                        for line in f:
+                            if line.startswith('HET '):
+                                parts = line.split()
+                                if len(parts) >= 2:
+                                    ligand_name = parts[1]
+                                    break
+                            elif line.startswith('HETATM'):
+                                parts = line.split()
+                                if len(parts) >= 4:
+                                    resname = parts[3]
+                                    if resname not in ['HOH', 'WAT', 'SO4', 'PO4', 'CL', 'NA']:  # Skip common ions/water
+                                        ligand_name = resname
+                                        break
+                
+                if ligand_name:
+                    tmp_chain,liglist = extract_lig_recpt(model,ligand_name)
+                    pocket = get_binding_pockets(tmp_chain,liglist)
+                    pocket = [pocket2lmdb(n,p,d.split('.')[0]) for n,p in pocket]
+                    all_pocket += pocket
+                else:
+                    logger.warning(f"Could not extract ligand name from {d}, skipping")
+            except Exception as e:
+                logger.warning(f"Error processing {d}: {e}")
                 pass
     if os.path.exists(os.path.join(dirs,f'{name}.lmdb')):
         return 0
+    if len(all_pocket) == 0:
+        error_msg = f"No pockets found in {dirs}. Please check PDB files and ligand names."
+        logger.error(error_msg)
+        raise ValueError(error_msg)
     write_lmdb(all_pocket,os.path.join(dirs,f'{name}.lmdb'),0)
     return 1
 
@@ -172,11 +202,74 @@ def main(args):
 
     model.eval()
 
-    if not os.path.exists(os.path.join(args.pocket_dir, "pocket.lmdb")):
-        ret = process_one_pdbdir(args.pocket_dir)
+    pocket_lmdb_path = os.path.join(args.pocket_dir, "pocket.lmdb")
+    if not os.path.exists(pocket_lmdb_path):
+        try:
+            ret = process_one_pdbdir(args.pocket_dir)
+            if not os.path.exists(pocket_lmdb_path):
+                raise ValueError(f"Failed to create pocket.lmdb in {args.pocket_dir}. No pockets were extracted from PDB files.")
+        except ValueError as e:
+            # Re-raise ValueError from process_one_pdbdir
+            raise
+        except Exception as e:
+            raise ValueError(f"Error processing PDB files in {args.pocket_dir}: {e}")
+    else:
+        # Check if pocket.lmdb is empty or corrupted
+        try:
+            import lmdb
+            env = lmdb.open(pocket_lmdb_path, subdir=False, readonly=True)
+            txn = env.begin()
+            keys = list(txn.cursor().iternext(values=False))
+            env.close()
+            if len(keys) == 0:
+                logger.warning(f"pocket.lmdb is empty, regenerating...")
+                os.remove(pocket_lmdb_path)
+                try:
+                    ret = process_one_pdbdir(args.pocket_dir)
+                    if not os.path.exists(pocket_lmdb_path):
+                        raise ValueError(f"Failed to regenerate pocket.lmdb in {args.pocket_dir}. No pockets were extracted from PDB files.")
+                except ValueError as e:
+                    raise
+                except Exception as e:
+                    raise ValueError(f"Error regenerating pocket.lmdb: {e}")
+        except Exception as e:
+            if isinstance(e, ValueError):
+                raise
+            logger.warning(f"Error checking pocket.lmdb: {e}, regenerating...")
+            if os.path.exists(pocket_lmdb_path):
+                os.remove(pocket_lmdb_path)
+            try:
+                ret = process_one_pdbdir(args.pocket_dir)
+                if not os.path.exists(pocket_lmdb_path):
+                    raise ValueError(f"Failed to regenerate pocket.lmdb in {args.pocket_dir}. No pockets were extracted from PDB files.")
+            except ValueError as e:
+                raise
+            except Exception as e:
+                raise ValueError(f"Error regenerating pocket.lmdb: {e}")
+
+    # Verify pocket.lmdb exists and is not empty before proceeding
+    if not os.path.exists(pocket_lmdb_path):
+        raise ValueError(f"pocket.lmdb does not exist in {args.pocket_dir}. No pockets were extracted from PDB files.")
+    
+    try:
+        import lmdb
+        env = lmdb.open(pocket_lmdb_path, subdir=False, readonly=True)
+        txn = env.begin()
+        keys = list(txn.cursor().iternext(values=False))
+        env.close()
+        if len(keys) == 0:
+            raise ValueError(f"pocket.lmdb is empty. No pockets were extracted from PDB files in {args.pocket_dir}")
+    except ImportError:
+        pass  # lmdb not available, skip check
+    except FileNotFoundError:
+        raise ValueError(f"pocket.lmdb does not exist in {args.pocket_dir}. No pockets were extracted from PDB files.")
+    except Exception as e:
+        if isinstance(e, ValueError):
+            raise
+        raise ValueError(f"Error reading pocket.lmdb: {e}")
 
     # read pocket dir 
-    pocket_reps, pocket_names = task.encode_pockets_multi_folds(model, args.pocket_dir, os.path.join(args.pocket_dir, "pocket.lmdb"))
+    pocket_reps, pocket_names = task.encode_pockets_multi_folds(model, args.pocket_dir, pocket_lmdb_path)
 
     # print shape
 
